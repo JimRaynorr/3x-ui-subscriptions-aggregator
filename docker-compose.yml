@@ -1,0 +1,11 @@
+services:
+  xui-aggregator:
+    build: .
+    container_name: xui_aggregator
+    restart: always
+    ports:
+      - "127.0.0.1:8001:8000" # Слушаем на 8001 порту хоста, только локально
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app
