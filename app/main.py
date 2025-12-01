@@ -2,6 +2,7 @@ import os
 import base64
 import asyncio
 import httpx
+import urllib.parse
 from fastapi import FastAPI, Response, Request, HTTPException
 import logging
 
@@ -25,6 +26,14 @@ def decode_base64(data: str) -> str:
         return ""
 
 
+def create_dummy_link(text: str) -> str:
+    """Создает нерабочую ссылку с нужным текстом в названии."""
+    # Кодируем текст для URL (пробелы -> %20 и т.д.)
+    safe_name = urllib.parse.quote(text.strip())
+    # UUID нулей, локальный адрес
+    return f"vless://00000000-0000-0000-0000-000000000000@127.0.0.1:1234?encryption=none&security=none&type=tcp&headerType=none#{safe_name}"
+
+
 @app.get("/{path:path}")
 async def proxy_subscription(path: str, request: Request):
     servers_env = os.getenv("SERVERS", "")
@@ -32,6 +41,9 @@ async def proxy_subscription(path: str, request: Request):
 
     if not servers:
         raise HTTPException(status_code=500, detail="Configuration error: No servers")
+
+    subscription_name = os.getenv("SUBSCRIPTION_NAME", "VPN-Subscription")
+    info_text_env = os.getenv("INFO_TEXT", "")
 
     async with httpx.AsyncClient(verify=False, timeout=15.0) as client:
         tasks = []
@@ -45,45 +57,50 @@ async def proxy_subscription(path: str, request: Request):
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     collected_configs = []
-    # Переменная для хранения имени файла (названия подписки)
-    subscription_filename = "VPN-Subscription"
+    user_info_header = ""
 
+    # 1. Сначала добавляем наши текстовые сообщения (фейковые конфиги)
+    if info_text_env:
+        messages = info_text_env.split('|')
+        for msg in messages:
+            if msg.strip():
+                collected_configs.append(create_dummy_link(msg))
+
+    # 2. Собираем реальные конфиги
     for i, response in enumerate(results):
         if isinstance(response, httpx.Response) and response.status_code == 200:
-            # Пытаемся вытащить имя подписки из заголовков первого сервера (обычно локального)
-            # или любого другого, если имя еще не найдено
-            if i == 0 or subscription_filename == "VPN-Subscription":
-                content_disp = response.headers.get("content-disposition", "")
-                if "filename=" in content_disp:
-                    try:
-                        # Парсим "filename="MySub"" -> MySub
-                        parts = content_disp.split('filename=')
-                        if len(parts) > 1:
-                            fname = parts[1].strip().strip('"').strip("'")
-                            if fname:
-                                subscription_filename = fname
-                    except Exception:
-                        pass
+            # Пытаемся сохранить инфу о трафике (обычно от первого/локального сервера)
+            if not user_info_header:
+                # Ищем заголовок Subscription-Userinfo в любом регистре
+                for k, v in response.headers.items():
+                    if k.lower() == 'subscription-userinfo':
+                        user_info_header = v
+                        break
 
             decoded = decode_base64(response.text)
             if decoded:
-                collected_configs.append(decoded)
+                # Добавляем перенос строки на всякий случай
+                if collected_configs:
+                    collected_configs.append("\n")
+                collected_configs.append(decoded.strip())
         else:
-            logger.error(f"Failed fetch: {servers[i]}")
+            logger.error(f"Failed to fetch from {servers[i]}")
 
     if not collected_configs:
         raise HTTPException(status_code=404, detail="No subscriptions found")
 
-    full_config = "".join(collected_configs)
+    full_config = "\n".join(collected_configs)
     encoded_config = base64.b64encode(full_config.encode('utf-8')).decode('utf-8')
 
-    # Возвращаем ответ с заголовком
-    return Response(
-        content=encoded_config,
-        media_type="text/plain; charset=utf-8",
-        headers={
-            "Content-Disposition": f'attachment; filename="{subscription_filename}"',
-            "Profile-Update-Interval": "24",  # Частота обновления (в часах) для некоторых клиентов
-            "Subscription-Userinfo": ""  # Можно добавить инфу о трафике, если нужно заморочиться
-        }
-    )
+    # Формируем заголовки ответа
+    response_headers = {
+        "Content-Disposition": f'attachment; filename="{subscription_name}"',
+        "Profile-Update-Interval": "24",
+        "Content-Type": "text/plain; charset=utf-8"
+    }
+
+    # Если нашли инфу о трафике, добавляем её
+    if user_info_header:
+        response_headers["Subscription-Userinfo"] = user_info_header
+
+    return Response(content=encoded_config, headers=response_headers)
