@@ -97,6 +97,7 @@ async def proxy_subscription(path: str, request: Request):
         "Content-Disposition": f'attachment; filename="{subscription_name}"',
         "Profile-Update-Interval": "24",
         "Content-Type": "text/plain; charset=utf-8",
+        "profile-title": subscription_name[:25]
     }
 
     # Текстовые сообщения для Happ / Guava через заголовок announce
