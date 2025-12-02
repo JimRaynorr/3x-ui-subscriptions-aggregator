@@ -30,10 +30,8 @@ def decode_base64(data: str) -> str:
 
 
 def create_dummy_link(text: str) -> str:
-    """Создает нерабочую ссылку с нужным текстом в названии (больше не используется)."""
-    # Кодируем текст для URL (пробелы -> %20 и т.д.)
+    """Создает нерабочую ссылку с нужным текстом в названии (для старых клиентов)."""
     safe_name = urllib.parse.quote(text.strip())
-    # UUID нулей, локальный адрес
     return (
         "vless://00000000-0000-0000-0000-000000000000@127.0.0.1:1234"
         "?encryption=none&security=none&type=tcp&headerType=none"
@@ -63,15 +61,14 @@ async def proxy_subscription(path: str, request: Request):
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    collected_configs = []
+    local_configs = []   # Для конфигов с первого сервера (локального)
+    remote_configs = []  # Для всех остальных
     user_info_header = ""
 
-    # Собираем реальные конфиги
     for i, response in enumerate(results):
         if isinstance(response, httpx.Response) and response.status_code == 200:
             # Пытаемся сохранить инфу о трафике (обычно от первого/локального сервера)
             if not user_info_header:
-                # Ищем заголовок Subscription-Userinfo в любом регистре
                 for k, v in response.headers.items():
                     if k.lower() == "subscription-userinfo":
                         user_info_header = v
@@ -79,17 +76,21 @@ async def proxy_subscription(path: str, request: Request):
 
             decoded = decode_base64(response.text)
             if decoded:
-                # Добавляем перенос строки на всякий случай
-                if collected_configs:
-                    collected_configs.append("\n")
-                collected_configs.append(decoded.strip())
+                # Если это первый сервер в списке (i == 0) - считаем его локальным и откладываем
+                if i == 0:
+                    local_configs.append(decoded.strip())
+                else:
+                    remote_configs.append(decoded.strip())
         else:
             logger.error(f"Failed to fetch from {servers[i]}")
 
-    if not collected_configs:
+    # Склеиваем: сначала ВНЕШНИЕ (remote), потом ЛОКАЛЬНЫЕ (local)
+    final_configs_list = remote_configs + local_configs
+
+    if not final_configs_list:
         raise HTTPException(status_code=404, detail="No subscriptions found")
 
-    full_config = "\n".join(collected_configs)
+    full_config = "\n".join(final_configs_list)
     encoded_config = base64.b64encode(full_config.encode("utf-8")).decode("utf-8")
 
     # Формируем заголовки ответа
@@ -102,9 +103,7 @@ async def proxy_subscription(path: str, request: Request):
 
     # Текстовые сообщения для Happ / Guava через заголовок announce
     if info_text_env:
-        # Несколько сообщений через | -> несколько строк
         announce_text = info_text_env.replace("|", "\n").strip()
-        # Рекомендуемый формат — base64 с префиксом base64:
         announce_b64 = base64.b64encode(announce_text.encode("utf-8")).decode("ascii")
         response_headers["announce"] = f"base64:{announce_b64}"
 
